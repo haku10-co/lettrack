@@ -84,6 +84,10 @@ if __name__ == '__main__':
     # ローカル開発と本番環境で設定を分ける
     logging.info(f"Starting server on {HOST}:{PORT} with DEBUG={DEBUG}")
     logging.info(f"BASE_URL set to {BASE_URL}")
-    
+
+    # 利用可能なURLを出力
+    for rule in app.url_map.iter_rules():
+        logging.info(f"Endpoint: {rule.endpoint}, URL: {rule}")
+
     # 本番環境ではWSGIサーバー (例: Gunicorn, Waitress) を使用してください
     app.run(host=HOST, port=PORT, debug=DEBUG)
