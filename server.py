@@ -5,25 +5,53 @@ import logging
 from urllib.parse import urlparse, urlunparse
 import os
 from dotenv import load_dotenv
+from flask_cors import CORS
+# import gspread # gspread は不要になったので削除またはコメントアウト
+from datetime import datetime
+import requests # requests をインポート
+import json # json をインポート
 
 # .envファイルがある場合は読み込む
-load_dotenv(dotenv_path='.env.production')  # 明示的に.env.productionを指定
+load_dotenv(dotenv_path='.env.production')
 
 app = Flask(__name__)
+CORS(app)
 
-# ロギング設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 # 環境変数から設定を読み込む
-# デフォルト値はローカル開発用
 PORT = int(os.environ.get('PORT', 8080))
 HOST = os.environ.get('HOST', '0.0.0.0')
 DEBUG = os.environ.get('DEBUG', 'True').lower() == 'true'
 BASE_URL = os.environ.get('BASE_URL', 'http://localhost:8080')
+# --- GAS Web App 設定 ---
+GAS_WEB_APP_URL = os.environ.get('GAS_WEB_APP_URL') # 環境変数から GAS Web App URL を読み込み
+# --- GAS Web App 設定ここまで ---
 
 # 1x1 透明GIFピクセルデータ (Base64エンコード)
 # GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;
 TRANSPARENT_GIF_DATA = base64.b64decode("R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==")
+
+# --- GAS 連携 ---
+if not GAS_WEB_APP_URL:
+    logging.warning("GAS_WEB_APP_URL not configured. Data logging to GAS disabled.")
+
+def send_data_to_gas(data_dict):
+    """GAS Web AppにデータをPOSTする"""
+    if GAS_WEB_APP_URL:
+        try:
+            headers = {'Content-Type': 'application/json'}
+            # タイムアウトを設定 (例: 5秒)
+            response = requests.post(GAS_WEB_APP_URL, headers=headers, data=json.dumps(data_dict), timeout=5)
+            response.raise_for_status() # ステータスコードが 2xx でない場合に例外を発生させる
+            logging.info(f"Successfully sent data to GAS: {data_dict}, Response: {response.text}")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Failed to send data to GAS: {e}")
+        except Exception as e:
+             logging.error(f"An unexpected error occurred while sending data to GAS: {e}")
+    else:
+        logging.warning("GAS Web App URL not available. Skipping send.")
+# --- GAS 連携ここまで ---
 
 @app.route('/open/<tracking_id>')
 def track_open(tracking_id):
@@ -32,8 +60,23 @@ def track_open(tracking_id):
     """
     user_agent = request.headers.get('User-Agent', 'Unknown')
     ip_address = request.remote_addr
+    timestamp = datetime.now().isoformat() # 現在時刻を取得
+
     logging.info(f"Opened: tracking_id={tracking_id}, IP={ip_address}, User-Agent={user_agent}")
-    # ここでデータベースなどに記録する処理を追加できます
+
+    # --- GAS に送信するデータを作成 (辞書形式) ---
+    gas_data = {
+        "timestamp": timestamp,
+        "type": "open",
+        "trackingId": tracking_id,
+        "linkId": "", # open の場合は空
+        "originalUrl": "", # open の場合は空
+        "ipAddress": ip_address,
+        "userAgent": user_agent
+    }
+    send_data_to_gas(gas_data)
+    # --- GAS 送信ここまで ---
+
     return send_file(
         io.BytesIO(TRANSPARENT_GIF_DATA),
         mimetype='image/gif'
@@ -71,11 +114,24 @@ def track_click(tracking_id, link_id):
         logging.error(f"Invalid URL format: {original_url}, Error: {e}")
         abort(400, description="Invalid 'url' parameter format")
 
-
     user_agent = request.headers.get('User-Agent', 'Unknown')
     ip_address = request.remote_addr
+    timestamp = datetime.now().isoformat() # 現在時刻を取得
+
     logging.info(f"Clicked: tracking_id={tracking_id}, link_id={link_id}, url={original_url}, IP={ip_address}, User-Agent={user_agent}")
-    # ここでデータベースなどに記録する処理を追加できます
+
+    # --- GAS に送信するデータを作成 (辞書形式) ---
+    gas_data = {
+        "timestamp": timestamp,
+        "type": "click",
+        "trackingId": tracking_id,
+        "linkId": link_id,
+        "originalUrl": original_url,
+        "ipAddress": ip_address,
+        "userAgent": user_agent
+    }
+    send_data_to_gas(gas_data)
+    # --- GAS 送信ここまで ---
 
     # 302 Found リダイレクト
     return redirect(original_url, code=302)
