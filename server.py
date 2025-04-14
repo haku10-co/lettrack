@@ -3,11 +3,23 @@ from flask import Flask, request, redirect, send_file, abort
 import io
 import logging
 from urllib.parse import urlparse, urlunparse
+import os
+from dotenv import load_dotenv
+
+# .envファイルがある場合は読み込む
+load_dotenv()
 
 app = Flask(__name__)
 
 # ロギング設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
+# 環境変数から設定を読み込む
+# デフォルト値はローカル開発用
+PORT = int(os.environ.get('PORT', 8080))
+HOST = os.environ.get('HOST', '0.0.0.0')
+DEBUG = os.environ.get('DEBUG', 'True').lower() == 'true'
+BASE_URL = os.environ.get('BASE_URL', 'http://localhost:8080')
 
 # 1x1 透明GIFピクセルデータ (Base64エンコード)
 # GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;
@@ -26,6 +38,17 @@ def track_open(tracking_id):
         io.BytesIO(TRANSPARENT_GIF_DATA),
         mimetype='image/gif'
     )
+
+# トラッキングURLを生成するヘルパー関数
+def get_tracking_url(tracking_type, tracking_id, link_id=None, original_url=None):
+    """
+    トラッキング用URLを生成する
+    """
+    if tracking_type == 'open':
+        return f"{BASE_URL}/open/{tracking_id}"
+    elif tracking_type == 'click' and link_id and original_url:
+        return f"{BASE_URL}/click/{tracking_id}/{link_id}?url={original_url}"
+    return None
 
 @app.route('/click/<tracking_id>/<link_id>')
 def track_click(tracking_id, link_id):
@@ -58,5 +81,9 @@ def track_click(tracking_id, link_id):
     return redirect(original_url, code=302)
 
 if __name__ == '__main__':
+    # ローカル開発と本番環境で設定を分ける
+    logging.info(f"Starting server on {HOST}:{PORT} with DEBUG={DEBUG}")
+    logging.info(f"BASE_URL set to {BASE_URL}")
+    
     # 本番環境ではWSGIサーバー (例: Gunicorn, Waitress) を使用してください
-    app.run(host='0.0.0.0', port=8080, debug=True) # debug=True は開発時のみ
+    app.run(host=HOST, port=PORT, debug=DEBUG)
