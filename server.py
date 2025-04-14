@@ -7,7 +7,7 @@ import os
 from dotenv import load_dotenv
 
 # .envファイルがある場合は読み込む
-load_dotenv()
+load_dotenv(dotenv_path='.env.production')  # 明示的に.env.productionを指定
 
 app = Flask(__name__)
 
