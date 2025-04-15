@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # アプリケーションのポート番号（必要に応じて変更）
-EXPOSE 8080
+EXPOSE 8080:80
 
 # アプリケーションを実行
 CMD ["python", "server.py"] 
