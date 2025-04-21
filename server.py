@@ -1,20 +1,19 @@
-import base64
-from flask import Flask, request, redirect, send_file, abort, render_template_string, jsonify
-import io
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import RedirectResponse
+from datetime import datetime
+import queue, base64
 import logging
-from urllib.parse import urlparse, urlunparse
-import os
+import os # os をインポート
 from dotenv import load_dotenv
 from flask_cors import CORS
 # import gspread # gspread は不要になったので削除またはコメントアウト
-from datetime import datetime
 import requests # requests をインポート
 import json # json をインポート
 
 # .envファイルがある場合は読み込む
 load_dotenv(dotenv_path='.env.production')
 
-app = Flask(__name__)
+app = FastAPI()
 CORS(app)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -24,7 +23,7 @@ PORT = int(os.environ.get('PORT', 8080))
 HOST = os.environ.get('HOST', '0.0.0.0')
 DEBUG = os.environ.get('DEBUG', 'True').lower() == 'true'
 BASE_URL = os.environ.get('BASE_URL', 'http://localhost:8080')
-TRACKING_DOMAIN = os.environ.get('TRACKING_DOMAIN', 'localhost:8080')
+TRACKING_DOMAIN = os.environ.get('TRACKING_DOMAIN', 'let-inc.net')
 # --- GAS Web App 設定 ---
 GAS_WEB_APP_URL = os.environ.get('GAS_WEB_APP_URL') # 環境変数から GAS Web App URL を読み込み
 # --- GAS Web App 設定ここまで ---
@@ -54,92 +53,97 @@ def send_data_to_gas(data_dict):
         logging.warning("GAS Web App URL not available. Skipping send.")
 # --- GAS 連携ここまで ---
 
-@app.route('/open/<tracking_id>')
-def track_open(tracking_id):
-    """
-    メール開封をトラッキングするエンドポイント
-    """
+EVENT_Q = queue.SimpleQueue()          # push_worker と共有
+EMAIL_MAP = {}                         # {tracking_id: (company_id, company_name)}
+
+def enqueue(ev: dict):
+    """イベントキューにデータを追加する"""
+    logging.info(f"Enqueueing event: {ev}")
+    EVENT_Q.put(ev)
+
+@app.post("/register_email")
+async def register_email(item: dict):
+    """ローカル送信スクリプトからメール送信情報を登録する"""
+    tracking_id = item.get("tracking_id")
+    company_id = item.get("company_id")
+    company_name = item.get("company_name")
+    subject = item.get("subject")
+    body_snippet = item.get("body_snippet", "") # body_snippet がない場合も考慮
+
+    if not all([tracking_id, company_id, company_name, subject]):
+        logging.warning(f"Missing data in /register_email: {item}")
+        return {"ok": False, "error": "Missing required fields"}
+
+    EMAIL_MAP[tracking_id] = (company_id, company_name)
+    logging.info(f"Registered email: {tracking_id} for {company_name} ({company_id})")
+    enqueue({
+        "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z", # ISO 8601形式 (UTC)
+        "status": "sent",
+        "tracking_id": tracking_id,
+        "company_id": company_id,
+        "company_name": company_name,
+        "subject": subject,
+        "body_snippet": body_snippet[:120], # スニペットを120文字に制限
+        "url": "" # sent イベントには URL はない
+    })
+    return {"ok": True}
+
+@app.get("/open/{tid}")
+async def track_open(tid: str, request: Request):
+    """メール開封をトラッキングする"""
+    cid, cname = EMAIL_MAP.get(tid, ("", ""))
+    ip_address = request.client.host if request.client else "Unknown"
     user_agent = request.headers.get('User-Agent', 'Unknown')
-    ip_address = request.remote_addr
-    timestamp = datetime.now().isoformat() # 現在時刻を取得
 
-    logging.info(f"Opened: tracking_id={tracking_id}, IP={ip_address}, User-Agent={user_agent}")
+    logging.info(f"Open tracked: tid={tid}, IP={ip_address}, User-Agent={user_agent}")
 
-    # --- GAS に送信するデータを作成 (辞書形式) ---
-    gas_data = {
-        "timestamp": timestamp,
-        "type": "open",
-        "trackingId": tracking_id,
-        "linkId": "", # open の場合は空
-        "originalUrl": "", # open の場合は空
-        "ipAddress": ip_address,
-        "userAgent": user_agent
+    enqueue({
+        "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "status": "open",
+        "tracking_id": tid,
+        "company_id": cid,
+        "company_name": cname,
+        "url": "", # open イベントには URL はない
+        "ip_address": ip_address, # 追加情報
+        "user_agent": user_agent  # 追加情報
+    })
+    # キャッシュを防ぐヘッダーを追加
+    headers = {
+        'Cache-Control': 'no-cache, no-store, must-revalidate, private',
+        'Pragma': 'no-cache',
+        'Expires': '0'
     }
-    send_data_to_gas(gas_data)
-    # --- GAS 送信ここまで ---
+    return Response(content=TRANSPARENT_GIF_DATA, media_type="image/gif", headers=headers)
 
-    return send_file(
-        io.BytesIO(TRANSPARENT_GIF_DATA),
-        mimetype='image/gif'
-    )
-
-# トラッキングURLを生成するヘルパー関数
-def get_tracking_url(tracking_type, tracking_id, link_id=None, original_url=None):
-    """
-    トラッキング用URLを生成する
-    """
-    if tracking_type == 'open':
-        return f"{BASE_URL}/open/{tracking_id}"
-    elif tracking_type == 'click' and link_id and original_url:
-        return f"{BASE_URL}/click/{tracking_id}/{link_id}?url={original_url}"
-    return None
-
-def create_unsubscribe_url(email, tracking_id):
-    """配信停止用のURLを生成する"""
-    return f"https://{TRACKING_DOMAIN}/unsubscribe/{tracking_id}?email={email}"
-
-@app.route('/click/<tracking_id>/<link_id>')
-def track_click(tracking_id, link_id):
-    """
-    URLクリックをトラッキングし、元のURLにリダイレクトするエンドポイント
-    """
-    original_url = request.args.get('url')
-    if not original_url:
-        logging.warning(f"Click attempted with no URL: tracking_id={tracking_id}, link_id={link_id}")
-        abort(400, description="Missing 'url' parameter")
-
-    # URLの基本的な検証 (より厳密な検証が必要な場合もあります)
-    try:
-        parsed_url = urlparse(original_url)
-        if not parsed_url.scheme or not parsed_url.netloc:
-             raise ValueError("Invalid URL structure")
-        # URLを再構築して正規化 (例: 不要なフラグメントを削除するなど)
-        original_url = urlunparse(parsed_url)
-    except ValueError as e:
-        logging.error(f"Invalid URL format: {original_url}, Error: {e}")
-        abort(400, description="Invalid 'url' parameter format")
-
+@app.get("/click/{tid}/{link_id}")
+async def track_click(tid: str, link_id: str, request: Request): # link_id を str に変更
+    """URLクリックをトラッキングし、元のURLにリダイレクトする"""
+    url = request.query_params.get("url", "")
+    cid, cname = EMAIL_MAP.get(tid, ("", ""))
+    ip_address = request.client.host if request.client else "Unknown"
     user_agent = request.headers.get('User-Agent', 'Unknown')
-    ip_address = request.remote_addr
-    timestamp = datetime.now().isoformat() # 現在時刻を取得
 
-    logging.info(f"Clicked: tracking_id={tracking_id}, link_id={link_id}, url={original_url}, IP={ip_address}, User-Agent={user_agent}")
+    # URLがない場合のフォールバック先
+    fallback_url = f"https://{TRACKING_DOMAIN}"
 
-    # --- GAS に送信するデータを作成 (辞書形式) ---
-    gas_data = {
-        "timestamp": timestamp,
-        "type": "click",
-        "trackingId": tracking_id,
-        "linkId": link_id,
-        "originalUrl": original_url,
-        "ipAddress": ip_address,
-        "userAgent": user_agent
-    }
-    send_data_to_gas(gas_data)
-    # --- GAS 送信ここまで ---
+    logging.info(f"Click tracked: tid={tid}, link_id={link_id}, url={url}, IP={ip_address}, User-Agent={user_agent}")
 
+    enqueue({
+        "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "status": "click",
+        "tracking_id": tid,
+        "company_id": cid,
+        "company_name": cname,
+        "url": url,
+        "ip_address": ip_address, # 追加情報
+        "user_agent": user_agent,  # 追加情報
+        "link_id": link_id # 追加情報
+    })
+    # URLが有効かどうかの簡単なチェック (より厳密な検証も可能)
+    redirect_url = url if url and url.startswith(('http://', 'https://')) else fallback_url
+    logging.info(f"Redirecting to: {redirect_url}")
     # 302 Found リダイレクト
-    return redirect(original_url, code=302)
+    return RedirectResponse(redirect_url, status_code=302)
 
 # 配信停止ページのHTMLテンプレート
 UNSUBSCRIBE_HTML = '''

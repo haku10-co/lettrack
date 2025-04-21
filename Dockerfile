@@ -13,8 +13,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # アプリケーションコードをコピー
 COPY . .
 
-# アプリケーションのポート番号（必要に応じて変更）
-EXPOSE 8080:80
+# アプリケーションのポート番号（新しいポートに変更）
+EXPOSE 8081
 
-# アプリケーションを実行
-CMD ["python", "server.py"] 
+# uvicorn で FastAPI サーバーを起動し、同時に push_worker も起動
+CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port 8081 & python push_worker.py"] 

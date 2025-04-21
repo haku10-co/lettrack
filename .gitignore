@@ -52,7 +52,3 @@ htmlcov/
 .pytest_cache/
 instance/
 
-# 環境設定ファイル
-.env
-.env.local
-.env.production
